@@ -1,14 +1,17 @@
 // ==UserScript==
 // @name         Criticker-Translated-Titles
 // @namespace    https://criticker.com/
-// @version      2025-12-13
+// @version      2025-12-14
 // @description  Displays the translated film title on Criticker film pages in the preferred browser language.
 // @author       Alsweider
 // @match        https://www.criticker.com/film/*
+// @match        https://www.criticker.com/tv/*
 // @icon         https://www.criticker.com/favicon.ico
 // @grant        GM_xmlhttpRequest
 // @connect      query.wikidata.org
 // @license      MIT
+// @downloadURL https://update.greasyfork.org/scripts/558838/Criticker-Translated-Titles.user.js
+// @updateURL https://update.greasyfork.org/scripts/558838/Criticker-Translated-Titles.meta.js
 // ==/UserScript==
 
 (function () {
