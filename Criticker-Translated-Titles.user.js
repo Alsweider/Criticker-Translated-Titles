@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Criticker-Translated-Titles
 // @namespace    https://criticker.com/
-// @version      2026-05-11
+// @version      2026-05-12
 // @description  Displays the translated film title on Criticker film pages in the preferred browser language.
 // @author       Alsweider
 // @match        https://www.criticker.com/film/*
@@ -12,6 +12,7 @@
 // @grant        GM_getValue
 // @grant        GM_deleteValue
 // @connect      query.wikidata.org
+// @connect      www.wikidata.org
 // @license      MIT
 // @downloadURL https://update.greasyfork.org/scripts/558838/Criticker-Translated-Titles.user.js
 // @updateURL https://update.greasyfork.org/scripts/558838/Criticker-Translated-Titles.meta.js
@@ -20,9 +21,10 @@
 (function () {
     'use strict';
 
-    const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 Tage
-    const TIMEOUT_MS   = 180000;
-    const ELEM_ID      = 'wikidata-local-title';
+    const CACHE_TTL_MS  = 30 * 24 * 60 * 60 * 1000; // 30 Tage
+    const TIMEOUT_FAST  = 8000;    // MediaWiki-API: kurz – bei Ausbleiben sofort Fallback
+    const TIMEOUT_SLOW  = 60000;   // SPARQL: mehr Zeit, da letzte Stufe
+    const ELEM_ID       = 'wikidata-local-title';
 
     // --- IMDb-ID ermitteln ---
     const imdbLink = document.querySelector('.tip_sidebar_action a[href*="imdb.com/title/"]');
@@ -53,28 +55,91 @@
             return;
         }
 
-        fetchTitle(lang, function (title) {
-            if (title) {
-                GM_setValue(cacheKey, { title, ts: Date.now() });
-                setState(placeholder, 'found', title);
-            } else if (lang !== 'en') {
-                fetchTitle('en', function (enTitle) {
-                    if (enTitle) {
-                        GM_setValue(cacheKey, { title: enTitle, ts: Date.now() });
-                        setState(placeholder, 'found', enTitle);
-                    } else {
-                        setState(placeholder, 'notfound');
+        // Stufe 1: MediaWiki-API (schnell, kurzer Timeout)
+        // Holt QID per IMDb-ID-Suche, dann Label in gewünschter Sprache + Englisch als Reserve.
+        // Kein separater lang→en-Fallback nötig: beide Sprachen werden in einem Schritt abgefragt.
+        fetchFast(function (title) {
+            if (title) { save(title); return; }
+
+            // Stufe 2: SPARQL (langsamer, bewährt, langer Timeout)
+            fetchSparql(lang, function (title2) {
+                if (title2) { save(title2); return; }
+                if (lang !== 'en') {
+                    fetchSparql('en', function (title3) {
+                        title3 ? save(title3) : setState(placeholder, 'notfound');
+                    });
+                } else {
+                    setState(placeholder, 'notfound');
+                }
+            });
+        });
+    }
+
+    function save(title) {
+        GM_setValue(cacheKey, { title, ts: Date.now() });
+        setState(placeholder, 'found', title);
+    }
+
+    // --- Stufe 1: MediaWiki-API ---
+
+    function fetchFast(callback) {
+        // Schritt 1a: QID per Suche nach IMDb-ID-Property ermitteln
+        const searchUrl =
+            'https://www.wikidata.org/w/api.php?action=query&list=search' +
+            '&srsearch=' + encodeURIComponent('haswbstatement:P345=' + imdbID) +
+            '&srlimit=1&format=json&origin=*';
+
+        GM_xmlhttpRequest({
+            method:  'GET',
+            url:     searchUrl,
+            timeout: TIMEOUT_FAST,
+            onload: function (r) {
+                let qid;
+                try {
+                    const data = JSON.parse(r.responseText);
+                    qid = data?.query?.search?.[0]?.title; // z.B. "Q12345"
+                } catch { return callback(null); }
+                if (!qid) return callback(null);
+
+                // Schritt 1b: Label in gewünschter Sprache + Englisch als Fallback abrufen
+                const langs = lang !== 'en' ? `${lang}|en` : 'en';
+                const labelUrl =
+                    'https://www.wikidata.org/w/api.php?action=wbgetentities' +
+                    '&ids=' + encodeURIComponent(qid) +
+                    '&props=labels&languages=' + encodeURIComponent(langs) +
+                    '&format=json&origin=*';
+
+                GM_xmlhttpRequest({
+                    method:  'GET',
+                    url:     labelUrl,
+                    timeout: TIMEOUT_FAST,
+                    onload: function (r2) {
+                        try {
+                            const d      = JSON.parse(r2.responseText);
+                            const labels = d?.entities?.[qid]?.labels;
+                            // Bevorzuge Browsersprache, Englisch als Reserve
+                            const title  = labels?.[lang]?.value ?? labels?.['en']?.value ?? null;
+                            callback(title);
+                        } catch { callback(null); }
+                    },
+                    onerror:   () => callback(null),
+                    ontimeout: () => {
+                        console.warn('[Wikidata-Titel] MediaWiki-API Label-Abruf Timeout');
+                        callback(null);
                     }
                 });
-            } else {
-                setState(placeholder, 'notfound');
+            },
+            onerror:   () => callback(null),
+            ontimeout: () => {
+                console.warn('[Wikidata-Titel] MediaWiki-API Suche Timeout – versuche SPARQL');
+                callback(null);
             }
         });
     }
 
-    // --- Hilfsfunktionen ---
+    // --- Stufe 2: SPARQL (Fallback) ---
 
-    function fetchTitle(language, callback) {
+    function fetchSparql(language, callback) {
         const sparql = `
             SELECT ?label WHERE {
               ?film wdt:P345 "${imdbID}" .
@@ -89,7 +154,7 @@
         GM_xmlhttpRequest({
             method:  'GET',
             url:     url,
-            timeout: TIMEOUT_MS,
+            timeout: TIMEOUT_SLOW,
             headers: { 'Accept': 'application/sparql+json' },
             onload: function (response) {
                 let data;
@@ -104,11 +169,13 @@
             },
             onerror:   function () { callback(null); },
             ontimeout: function () {
-                console.warn('[Wikidata-Titel] Timeout nach ' + TIMEOUT_MS + ' ms');
+                console.warn('[Wikidata-Titel] SPARQL Timeout nach ' + TIMEOUT_SLOW + ' ms');
                 callback(null);
             }
         });
     }
+
+    // --- Hilfsfunktionen ---
 
     function createSpan() {
         const existing = document.getElementById(ELEM_ID);
@@ -135,17 +202,9 @@
         return btn;
     }
 
-    /**
-     * Setzt den visuellen Zustand des Platzhalters.
-     *
-     * 'loading'  → Ladehinweis, kein Button
-     * 'found'    → lokalisierter Titel + Reload-Button
-     * 'notfound' → Hinweis + Reload-Button, blendet sich nach 4 s aus
-     */
     function setState(el, state, text) {
         el.innerHTML     = '';
         el.style.cssText = 'display:block; font-size:0.8em;';
-        // Laufenden Fade-out-Timer zurücksetzen
         if (el._fadeTimeout) { clearTimeout(el._fadeTimeout); delete el._fadeTimeout; }
         el.style.opacity    = '1';
         el.style.transition = '';
@@ -155,10 +214,8 @@
                 el.style.color     = '#aaa';
                 el.style.fontStyle = 'italic';
                 el.textContent     = '↻ Searching for localised title …';
-                // Kein Reload-Button während des Ladens
                 break;
             }
-
             case 'found': {
                 el.style.color     = '#555';
                 el.style.fontStyle = 'normal';
@@ -166,13 +223,11 @@
                 el.appendChild(createReloadButton());
                 break;
             }
-
             case 'notfound': {
                 el.style.color     = '#bbb';
                 el.style.fontStyle = 'italic';
                 el.appendChild(document.createTextNode('(no localised title found)'));
                 el.appendChild(createReloadButton());
-                // Nach 4 s gemeinsam mit Button ausblenden und entfernen
                 el._fadeTimeout = setTimeout(() => {
                     el.style.transition = 'opacity 1s';
                     el.style.opacity    = '0';
