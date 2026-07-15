@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Criticker-Translated-Titles
 // @namespace    https://criticker.com/
-// @version      2026-05-12
+// @version      2026-07-16
 // @description  Displays the translated film title on Criticker film pages in the preferred browser language.
 // @author       Alsweider
 // @match        https://www.criticker.com/film/*
@@ -11,6 +11,7 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_deleteValue
+// @grant        GM_setClipboard
 // @connect      query.wikidata.org
 // @connect      www.wikidata.org
 // @license      MIT
@@ -177,12 +178,36 @@
 
     // --- Hilfsfunktionen ---
 
+    // Removes a possibly appended year in parentheses, e.g. "The Godfather (1972)" -> "The Godfather"
+    function stripYear(title) {
+        return title.replace(/\s*\(\d{4}\)\s*$/, '').trim();
+    }
+
     function createSpan() {
         const existing = document.getElementById(ELEM_ID);
         if (existing) return existing;
         const span = document.createElement('span');
         span.id    = ELEM_ID;
         return span;
+    }
+
+    function createCopyButton(getTitle) {
+        const btn = document.createElement('button');
+        btn.textContent    = '⎘';
+        btn.title          = 'Copy title to clipboard';
+        btn.style.cssText  =
+            'display:inline; margin-left:6px; background:none; border:none; cursor:pointer;' +
+            'color:#aaa; font-size:1em; padding:0; line-height:1;' +
+            'vertical-align:middle;';
+        btn.addEventListener('mouseenter', () => btn.style.color = '#555');
+        btn.addEventListener('mouseleave', () => btn.style.color = '#aaa');
+        btn.addEventListener('click', () => {
+            GM_setClipboard(stripYear(getTitle()), 'text');
+            const original = btn.textContent;
+            btn.textContent = '✓';
+            setTimeout(() => { btn.textContent = original; }, 1000);
+        });
+        return btn;
     }
 
     function createReloadButton() {
@@ -220,6 +245,7 @@
                 el.style.color     = '#555';
                 el.style.fontStyle = 'normal';
                 el.appendChild(document.createTextNode(text));
+                el.appendChild(createCopyButton(() => text));
                 el.appendChild(createReloadButton());
                 break;
             }
